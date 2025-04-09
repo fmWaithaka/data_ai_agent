@@ -2,329 +2,378 @@
 import streamlit as st
 import os
 from dotenv import load_dotenv
-import google.generativeai as genai
-import google.generativeai.types as types
-# Ensure utils.py or db_utils.py exists with your functions
+from google import genai
+from google.genai import types
 from utils import show_tables, get_table_columns, execute_query
-import time # Can be useful for debugging or adding small delays
-
+import time
+import pandas as pd
+import matplotlib.pyplot as plt
+import io
+import base64
+import asyncio 
 # --- Page Configuration ---
 st.set_page_config(
-    page_title="Retail DB Analyst Assistant",
-    page_icon="📊",
+    page_title="Retail DB Analyst Agent (Live API)",
+    page_icon="🚀",
     layout="wide"
 )
 
 # --- Load Environment Variables & Secrets ---
 load_dotenv()
-# Use Streamlit secrets first, then fallback to environment variables
+
 try:
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
 except Exception:
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-
+    
 # --- Check API Key ---
 if not GOOGLE_API_KEY:
-    st.error("🔴 Error: GOOGLE_API_KEY not found. Please set it in secrets or .env.")
-    st.stop()
-
-# --- Configure GenAI Client ---
-try:
-    genai.configure(api_key=GOOGLE_API_KEY)
-    print("GenAI Configured successfully.")
-except Exception as e:
-    st.error(f"🔴 Error configuring Google AI SDK: {e}")
+    st.error("🔴 Error: GOOGLE_API_KEY not found.")
     st.stop()
 
 # --- Tool Definition & Mapping ---
-# Your imported Python functions that the AI can call
+# Dictionary mapping names to the actual Python functions
 available_functions = {
     "show_tables": show_tables,
     "get_table_columns": get_table_columns,
     "execute_query": execute_query,
 }
-# Define tools for the model using the functions
-db_tools = [show_tables, get_table_columns, execute_query]
 
-# --- Gemini Model Initialization (Cached) ---
-@st.cache_resource # Cache the model and chat session resource for efficiency
-def init_gemini_chat():
-    print("Attempting to initialize Gemini Model and Chat...")
+# --- Live Client Initialization (Cached) ---
+@st.cache_resource
+def init_live_client():
+    """Initializes the GenAI Client for the Live API (v1alpha)."""
+    print("Initializing Live Client for v1alpha API...")
     try:
-        # --- Enhanced System Instruction ---
-        system_instruction = """You are an expert Data Analyst Assistant working with a retail MySQL database (version 8.0.35).
-        Your goal is to help the user explore, clean, transform, and understand the data to facilitate building Power BI dashboards.
-
-        **Core Capabilities (using provided tools):**
-        - Use `show_tables` to list available tables.
-        - Use `get_table_columns` to understand table schemas (column names, data types).
-        - Use `execute_query` to run **SELECT** SQL queries. Construct queries involving:
-            - Filtering (WHERE), Joins (INNER, LEFT), Aggregations (GROUP BY, SUM, AVG, COUNT, MIN, MAX),
-            - Data Cleaning/Transformation (DISTINCT, CASE), Window Functions (RANK, ROW_NUMBER), Date/Time functions, CTEs.
-        - **Strictly Prohibited:** You CANNOT execute SQL commands like UPDATE, DELETE, INSERT, DROP, etc. If asked, state you cannot perform modifications.
-
-        **Workflow:**
-        1.  **Understand & Plan:** Analyze the user's request. Ask clarifying questions ONLY if the request is too ambiguous. Determine the SQL query or sequence needed.
-        2.  **Execute:** Use the appropriate tool (`show_tables`, `get_table_columns`, or `execute_query`).
-        3.  **Analyze Results:** Briefly interpret the results from the tool.
-        4.  **Respond:** Present the results clearly. Use Markdown for text. If `execute_query` returned data, summarize the findings based on that data.
-        5.  **Recommend (Power BI Context):** Based on the query results or analysis, proactively suggest:
-            - Relevant KPIs to track.
-            - Interesting follow-up questions the analyst might ask.
-            - Potential data quality issues observed (e.g., based on NULL counts or unexpected values if queried).
-            - Suitable visualization types for Power BI (e.g., "This trend data could be shown effectively with a Line Chart in Power BI.").
-
-        **Focus on providing actionable data insights and relevant dashboarding recommendations.**
-        """
-
-        model = genai.GenerativeModel(
-            "gemini-1.5-flash", # Good balance of capability and speed
-            system_instruction=system_instruction,
-            tools=db_tools) # Provide the list of function objects
-
-        # Start chat WITHOUT automatic function calling - we will handle the loop
-        chat = model.start_chat()
-        print("Gemini Model and Chat initialized successfully (Manual Function Calling).")
-        return chat
+        # Client instance required for Live API
+        live_client = genai.Client(
+            api_key=GOOGLE_API_KEY,
+            http_options=types.HttpOptions(api_version='v1alpha') # Critical for Live API
+        )
+        print("Live Client initialized successfully.")
+        return live_client
+    except AttributeError as ae:
+         st.error(f"🔴 SDK Error: 'genai' module has no attribute 'Client'. Found version {genai.__version__}. Please ensure the correct library version is installed and the environment is clean. Details: {ae}")
+         print(f"AttributeError during Live Client init: {ae}")
+         return None
     except Exception as e:
-        st.error(f"🔴 Error initializing Gemini Model: {e}")
-        print(f"Error details during init: {e}")
+        st.error(f"🔴 Error initializing Live Client: {e}")
+        print(f"Error details during Live Client init: {e}")
         return None
 
-chat_session = init_gemini_chat()
+live_client = init_live_client()
 
-# Stop execution if chat session failed to initialize
-if not chat_session:
-    st.error("🔴 Failed to initialize chat session. Please check API key and configuration.")
+if not live_client:
     st.stop()
 
-# --- Streamlit UI ---
-st.title("📊 Retail Database Analyst Assistant")
-st.write("Ask questions in natural language to explore the `retail_db` database and get Power BI recommendations.")
-st.markdown("---")
-
-# --- Sidebar (Keep as is from Phase 2) ---
-with st.sidebar:
-    st.header("Database Schema")
-    st.markdown("Explore the tables and columns available.")
-
-    @st.cache_data(ttl=3600)
-    def cached_show_tables():
-        return show_tables()
-
-    @st.cache_data(ttl=3600)
-    def cached_get_table_columns(table_name):
-        return get_table_columns(table_name)
-
-    tables = []
-    try:
-        with st.spinner("Loading tables..."):
-            tables = cached_show_tables()
-    except Exception as e:
-        st.error(f"Error loading tables: {e}")
-
-    if tables:
-        selected_table = st.selectbox(
-            "Select a table to view its schema:",
-            options=[""] + tables, index=0,
-        )
-        if selected_table:
-            st.subheader(f"Schema for `{selected_table}`")
-            try:
-                with st.spinner(f"Fetching columns for {selected_table}..."):
-                    columns = cached_get_table_columns(selected_table)
-                if columns:
-                    st.dataframe(columns, use_container_width=True)
-                elif isinstance(columns, list):
-                     st.info(f"Table `{selected_table}` schema information might be unavailable or empty.")
-                else:
-                    st.warning(f"Could not retrieve columns for `{selected_table}`.")
-            except Exception as e:
-                st.error(f"Error fetching columns for {selected_table}: {e}")
-    elif isinstance(tables, list):
-         st.warning("No tables found in the database.")
-    else:
-        st.error("Failed to retrieve table list from the database.")
-
-
-# --- Main Chat Area ---
-st.header("Chat with your Data")
-
-# Initialize chat history
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# --- Helper function to display results intelligently ---
 def display_results(container, result_data, execute_query_sql=None):
-    """Displays tool results (dataframes, metrics, lists, errors)"""
     if isinstance(result_data, list) and result_data:
         if isinstance(result_data[0], dict):
-            # Check for specific error structure from db_utils
             if "error" in result_data[0]:
                  container.error(f"Database/Tool Error: {result_data[0]['error']}")
                  return
-
-            # Display as DataFrame
             try:
+                 if execute_query_sql:
+                      with container.expander("View SQL Query"):
+                           st.code(execute_query_sql, language="sql")
                  container.dataframe(result_data)
             except Exception as df_e:
                  container.warning(f"Could not display data as DataFrame ({df_e}), showing raw list:")
-                 container.write(result_data) # Fallback
-
-            # Basic heuristic for single value metrics (enhance as needed)
+                 container.write(result_data)
             if len(result_data) == 1 and len(result_data[0]) == 1:
                  key = list(result_data[0].keys())[0]
                  value = result_data[0][key]
                  if isinstance(value, (int, float)):
                       formatted_value = f"{value:,.2f}" if isinstance(value, float) else f"{value:,}"
-                      # Use columns for side-by-side layout
                       col1, col2 = container.columns([1, 3])
                       col1.metric(label=key.replace('_', ' ').title(), value=formatted_value)
-                      # col2 can be used for comparison or context later
-                      return # Stop if displayed as metric
-
-        else: # Handle list of non-dicts (e.g., from show_tables)
+                      return
+        else:
             container.write(result_data)
     elif isinstance(result_data, str):
-         if "error" in result_data.lower(): # Check for string errors
-              container.error(result_data)
-         else:
-              container.markdown(result_data)
+         if "error" in result_data.lower(): container.error(result_data)
+         else: container.markdown(result_data)
     elif result_data is None or (isinstance(result_data, list) and not result_data):
          container.info("Tool execution returned no data.")
-    else: # Fallback for other types
-        container.write(result_data)
+    else: container.write(result_data)
 
+def display_code_execution_results(container, result_part_dict):
+    """Displays code execution results dict, attempting to render plots."""
+    outcome_str = str(result_part_dict.get('outcome', 'UNKNOWN')).lower()
+    output_str = str(result_part_dict.get('output', ''))
+    if outcome_str == 'ok':
+        container.success("✅ Code executed successfully.")
+        if output_str:
+            captured_plot = False
+            try:
+                fig = plt.gcf()
+                if fig and fig.axes and any(ax.has_data() for ax in fig.axes):
+                    container.pyplot(fig)
+                    plt.clf(); plt.close(fig) # Clear and close figure
+                    print("Displayed plot using st.pyplot(gcf).")
+                    captured_plot = True
+            except Exception as plt_e: print(f"Plot capture with gcf failed: {plt_e}")
+            if not captured_plot:
+                 container.markdown("**Code Output:**")
+                 container.code(output_str, language='text')
+    else:
+        container.error(f"⚠️ Code execution failed: {outcome_str}")
+        if output_str: container.code(output_str, language='text')
+
+
+# --- Async Handler for Live API Interaction ---
+async def process_live_session(client, model_name, config, initial_message, tool_implementations):
+    """Connects to Live API, sends message, handles stream, returns collected outputs."""
+    collected_outputs = [] 
+    final_text_summary = None # Store the textual summary if received
+
+    print("Starting Live API session...")
+    try:
+        async with client.aio.live.connect(model=model_name, config=config) as session:
+            print("Live API Session connected. Sending initial message...")
+            await session.send(input=initial_message, end_of_turn=True)
+
+            async for msg in session.receive():
+                print(f"Received msg part type: {type(msg)}") # Debug msg types
+                # --- Parse Message Parts ---
+                if text := msg.text:
+                    print(f"Received text chunk: {text[:100]}...")
+                    collected_outputs.append({"type": "text", "content": text})
+                    final_text_summary = text # Overwrite with the last text received
+                elif tool_call := msg.tool_call:
+                    print(f"Received tool call request: {tool_call.function_calls}")
+                    tool_responses_to_send = []
+                    for fc in tool_call.function_calls:
+                        tool_name = fc.name
+                        tool_args = dict(fc.args)
+                        sql = tool_args.get('sql') # Get SQL if present
+                        collected_outputs.append({"type": "tool_call", "content": {"name": tool_name, "args": tool_args}})
+
+                        if tool_name in tool_implementations:
+                            tool_impl = tool_implementations[tool_name]
+                            try:
+                                print(f"Executing tool: {tool_name}")
+                                # IMPORTANT: Run synchronous DB calls in executor to avoid blocking asyncio loop
+                                loop = asyncio.get_running_loop()
+                                result = await loop.run_in_executor(None, lambda: tool_impl(**tool_args))
+                                print(f"Tool {tool_name} executed successfully.")
+                                tool_response_part = types.FunctionResponse(name=fc.name, id=fc.id, response={'result': result})
+                                collected_outputs.append({"type": "tool_result", "content": result, "sql": sql})
+                            except Exception as e:
+                                print(f"Error executing tool {tool_name}: {e}")
+                                result = {"error": str(e)}
+                                tool_response_part = types.FunctionResponse(name=fc.name, id=fc.id, response=result)
+                                collected_outputs.append({"type": "tool_error", "content": str(e)})
+                        else: 
+                             print(f"Error: Unknown tool requested: {tool_name}")
+                             result = {"error": f"Tool '{tool_name}' not found."}
+                             tool_response_part = types.FunctionResponse(name=fc.name, id=fc.id, response=result)
+                             collected_outputs.append({"type": "tool_error", "content": f"Unknown tool: {tool_name}"})
+                        tool_responses_to_send.append(tool_response_part)
+
+                    # Send tool responses back
+                    if tool_responses_to_send:
+                         print("Sending tool responses back to Live API...")
+                         tool_response_msg = types.LiveClientToolResponse(function_responses=tool_responses_to_send)
+                         await session.send(input=tool_response_msg)
+                         print("Tool responses sent.")
+
+                elif msg.server_content and msg.server_content.model_turn:
+                    # Handle code execution parts
+                    for part in msg.server_content.model_turn.parts:
+                        if code := part.executable_code:
+                            print("Received executable code from AI.")
+                            collected_outputs.append({"type": "code", "content": code.code})
+                        elif result := part.code_execution_result:
+                            print(f"Received code execution result: Outcome={result.outcome}")
+                            result_info = {"outcome": str(result.outcome), "output": str(result.output)}
+                            collected_outputs.append({"type": "code_result", "content": result_info})
+                        else:
+                             print(f"Received other server_content part: {type(part)}")
+                else:
+                     print(f"Received unhandled message type: {type(msg)}")
+
+
+    except Exception as e:
+        print(f"Error during Live API session processing: {e}")
+        collected_outputs.append({"type": "error", "content": f"An error occurred during the session: {e}"})
+
+    print("Live API session processing finished.")
+    # Return all collected parts for display and the final text summary
+    return collected_outputs, final_text_summary
+
+
+# --- Streamlit UI ---
+st.title("🚀 Retail DB Analyst Agent (Live API) 🚀")
+st.write("""
+Ask questions, request analysis, or generate plots about the `retail_db` database.
+The AI uses the Live API with SQL tools and Python Code Execution.
+""")
+st.markdown("---")
+
+# --- Sidebar ---
+with st.sidebar:
+    # (Sidebar code remains unchanged)
+    st.header("Database Schema")
+    st.markdown("Explore the tables and columns available.")
+    @st.cache_data(ttl=3600)
+    def cached_show_tables(): return show_tables()
+    @st.cache_data(ttl=3600)
+    def cached_get_table_columns(table_name): return get_table_columns(table_name)
+    tables = []
+    try:
+        with st.spinner("Loading tables..."): tables = cached_show_tables()
+    except Exception as e: st.error(f"Error loading tables: {e}")
+    if tables:
+        selected_table = st.selectbox("Select a table:", options=[""] + tables, index=0)
+        if selected_table:
+            st.subheader(f"Schema: `{selected_table}`")
+            try:
+                with st.spinner(f"Fetching columns..."): columns = cached_get_table_columns(selected_table)
+                if columns: st.dataframe(columns, use_container_width=True)
+                elif isinstance(columns, list): st.info(f"No schema info for `{selected_table}`.")
+                else: st.warning(f"Could not retrieve columns for `{selected_table}`.")
+            except Exception as e: st.error(f"Error fetching columns: {e}")
+    elif isinstance(tables, list): st.warning("No tables found.")
+    else: st.error("Failed to retrieve tables.")
+
+
+# --- Main Chat Area ---
+st.header("Chat Interaction")
+
+# Initialize chat history
+if "messages" not in st.session_state:
+    st.session_state.messages = [] # 
+if "assistant_turn_details" not in st.session_state:
+     st.session_state.assistant_turn_details = {} 
 
 # --- Display Chat History ---
-# Store results temporarily to display them within the corresponding assistant turn
-assistant_outputs = {} # turn_index -> list of outputs (text, data)
-
 for idx, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
-        content = message["content"]
-        if message["role"] == "assistant" and idx in assistant_outputs:
-             # Display multiple parts (data + text) for this assistant turn
-             for output in assistant_outputs[idx]:
-                  if output["type"] == "data":
-                       display_results(st.container(), output["data"], output.get("sql"))
-                  elif output["type"] == "text":
-                       st.markdown(output["data"])
-                  else: # Fallback
-                       st.write(output["data"])
-        elif isinstance(content, str): # Default display for user messages or simple text
-            st.markdown(content)
-        # If content needs special handling but isn't pre-processed, add logic here
-        # else:
-        #    st.write(content)
+        if message["role"] == "assistant" and idx in st.session_state.assistant_turn_details:
+            # Render detailed parts if available
+            turn_container = st.container()
+            for part_info in st.session_state.assistant_turn_details[idx]:
+                content_type = part_info.get("type", "unknown")
+                content = part_info.get("content", "")
+                sql = part_info.get("sql")
+                if content_type == "text": turn_container.markdown(content)
+                elif content_type == "data" or content_type == "tool_result": display_results(turn_container, content, sql)
+                elif content_type == "code": turn_container.markdown("**Generated Code:**"); turn_container.code(content, language='python')
+                elif content_type == "code_result": display_code_execution_results(turn_container, content)
+                elif content_type == "tool_error" or content_type == "error": turn_container.error(str(content))
+
+        elif isinstance(message["content"], str): # Default for user messages
+            st.markdown(message["content"])
+        else: # Fallback
+             st.write(message["content"])
 
 
 # --- Handle New User Input ---
-if prompt := st.chat_input("Ask about the data (e.g., What are the top 5 products by revenue?)"):
-    # Add user message to state and display
+if prompt := st.chat_input("Ask about data, request analysis or plots..."):
+    # Add user message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # --- Manual Function Calling Loop ---
-    processing_complete = False
-    current_prompt_content = prompt
-    turn_index = len(st.session_state.messages) # Index for the upcoming assistant message
-    assistant_outputs[turn_index] = [] # Initialize output list for this turn
-
+    # --- Process using Live API ---
     with st.chat_message("assistant"):
-        # Use a status indicator for ongoing processing steps
-        with st.status("Processing request...", expanded=True) as status:
+        status_placeholder = st.status("Processing via Live API...", expanded=True)
+        # Create container for results within the chat message context
+        results_container = st.container()
+
+        try:
+            # --- Prepare Live API Config ---
+            model_name = 'gemini-2.0-flash-exp' # Requires capable model
+
+            # Create FunctionDeclarations for DB tools, passing the initialized client
             try:
-                response = None
-                # Loop until the AI gives a final text response for this turn
-                while not processing_complete:
-                    status.update(label="Sending request to AI...")
-                    response = chat_session.send_message(current_prompt_content)
+                show_tables_tool_decl = types.FunctionDeclaration.from_callable(client=live_client, callable=show_tables)
+                get_cols_tool_decl = types.FunctionDeclaration.from_callable(client=live_client, callable=get_table_columns)
+                execute_query_tool_decl = types.FunctionDeclaration.from_callable(client=live_client, callable=execute_query)
 
-                    if not response.candidates or not response.candidates[0].content or not response.candidates[0].content.parts:
-                        status.error("Received an empty or invalid response from the AI.")
-                        assistant_outputs[turn_index].append({"type": "text", "data": "Sorry, I received an invalid response. Please try again."})
-                        processing_complete = True
-                        break
+                db_function_declarations = [
+                    show_tables_tool_decl.to_json_dict(), 
+                    get_cols_tool_decl.to_json_dict(),
+                    execute_query_tool_decl.to_json_dict()
+                ]
 
-                    # --- Process Response Parts ---
-                    next_prompt_parts = [] # Parts to send back in the next loop iteration
-                    found_final_text_in_part = False
+                print("Created FunctionDeclarations for Live API.")
+            except Exception as decl_e:
+                 st.error(f"Failed to create FunctionDeclarations for Live API: {decl_e}")
+                 raise decl_e # Stop if declarations fail
 
-                    for part in response.candidates[0].content.parts:
-                        if func_call := part.function_call:
-                            func_name = func_call.name
-                            args = dict(func_call.args)
-                            status.update(label=f"AI requested: `{func_name}`")
+            # System prompt (reuse the detailed one)
+            system_instruction = """You are an expert Data Analyst Assistant working with a retail MySQL database (version 8.0.35).
+                    Your goal is to help the user explore, clean, transform, analyze data, and get recommendations for Power BI dashboards.
 
-                            if func_name in available_functions:
-                                tool_function = available_functions[func_name]
-                                try:
-                                    sql_executed = args.get('sql', None) # Keep track of SQL if it's execute_query
-                                    status.write(f"Executing: `{func_name}({args if args else ''})`")
-                                    if sql_executed:
-                                         status.write(f"SQL: ```sql\n{sql_executed}\n```")
+                    **Core Capabilities:**
+                    1.  **Database Interaction (Tools: `show_tables`, `get_table_columns`, `execute_query`):**
+                        - Use these tools via function calls to interact with the database using SQL (SELECT queries only for `execute_query`). Construct complex SQL as needed.
+                        - **Prohibited SQL:** Do NOT execute UPDATE, DELETE, INSERT, etc.
+                    2.  **Code Execution (Built-in Tool):**
+                        - You have a built-in **Python Code Execution tool**. Use it for: Visualizations (Matplotlib, Seaborn - ensure plots render), Advanced Analysis (Pandas, Scipy, Numpy), Complex Transformations.
+                        - **Process:** Typically, fetch data using `execute_query`, then write and execute Python code. Import libraries within the generated code.
 
-                                    result_data = tool_function(**args) # Call the actual function
+                    **Workflow:**
+                    1.  **Understand & Plan:** Analyze request. Decide SQL vs Python code execution.
+                    2.  **Execute Tools:** Call DB functions or generate+execute Python code.
+                    3.  **Analyze Results:** Interpret SQL or code output. Check errors.
+                    4.  **Respond & Visualize:** Present results clearly (Markdown, summaries). **If you generate a plot, state that you are showing the plot.**
+                    5.  **Recommend (Power BI):** Provide actionable insights, follow-up questions, quality checks, or relevant Power BI visualization types based on the results.
 
-                                    status.write("Tool executed. Preparing results...")
-                                    # Add result data to output list for immediate display *after* loop
-                                    assistant_outputs[turn_index].append({"type": "data", "data": result_data, "sql": sql_executed})
-                                    # Prepare response part for next AI turn
-                                    next_prompt_parts.append(part) # Original call
-                                    next_prompt_parts.append(types.Part(function_response=types.FunctionResponse(name=func_name, response={"result": result_data})))
+                    **Focus on clear execution, actionable results, and relevant recommendations.**
+                    """
+            
+            config = {
+                "response_modalities": ["TEXT"], # Match working example
+                "system_instruction": {"parts": [{"text": system_instruction}]},
+                "tools": [
+                    {"code_execution": {}}, # Enable code execution
+                    {"function_declarations": db_function_declarations},
+                ],
+            }
 
-                                except Exception as tool_e:
-                                    status.error(f"Error calling tool '{func_name}': {tool_e}")
-                                    error_response = {"error": str(tool_e)}
-                                    assistant_outputs[turn_index].append({"type": "text", "data": f"Error executing `{func_name}`: {tool_e}"})
-                                    next_prompt_parts.append(part)
-                                    next_prompt_parts.append(types.Part(function_response=types.FunctionResponse(name=func_name, response=error_response)))
-                            else:
-                                status.error(f"AI requested unknown function '{func_name}'")
-                                error_response = {"error": f"Function '{func_name}' not available."}
-                                assistant_outputs[turn_index].append({"type": "text", "data": f"Error: Unknown function `{func_name}` requested."})
-                                next_prompt_parts.append(part)
-                                next_prompt_parts.append(types.Part(function_response=types.FunctionResponse(name=func_name, response=error_response)))
+            # --- Run the Async Task using asyncio.run ---
+            status_placeholder.update(label="Connecting and processing...")
+            # This executes the async function and waits for it to complete
+            collected_outputs, final_text_summary = asyncio.run(
+                process_live_session(
+                    client=live_client,
+                    model_name=model_name,
+                    config=config,
+                    initial_message=prompt,
+                    tool_implementations=available_functions # Pass Python functions here
+                )
+            )
+            status_placeholder.update(label="Processing complete.", state="complete", expanded=False)
 
-                        elif response_text := part.text:
-                            # Append final text to the output list for this turn
-                            assistant_outputs[turn_index].append({"type": "text", "data": response_text})
-                            found_final_text_in_part = True # Mark that we have the text
+            # --- Display Collected Outputs in the container ---
+            assistant_turn_idx = len(st.session_state.messages) # Index for this new turn
+            st.session_state.assistant_turn_details[assistant_turn_idx] = collected_outputs
 
-                        else:
-                             status.write(f"Received unprocessed part type: {type(part)}")
-                             print("Unprocessed part:", part) # Log unknown parts
+            for part_info in collected_outputs:
+                 content_type = part_info.get("type", "unknown")
+                 content = part_info.get("content", "")
+                 sql = part_info.get("sql")
+                 if content_type == "text": results_container.markdown(content)
+                 elif content_type == "data" or content_type == "tool_result": display_results(results_container, content, sql)
+                 elif content_type == "code": results_container.markdown("**Generated Code:**"); results_container.code(content, language='python')
+                 elif content_type == "code_result": display_code_execution_results(results_container, content)
+                 elif content_type == "tool_error" or content_type == "error": results_container.error(str(content))
+                 # Optionally hide tool_call details
 
-                    # --- End of Processing Parts for this AI Response ---
+            # Add a consolidated message to basic history
+            final_summary_for_history = final_text_summary if final_text_summary else "[Assistant processed request with tool/code usage]"
+            st.session_state.messages.append({"role": "assistant", "content": final_summary_for_history})
 
-                    if found_final_text_in_part:
-                        # If we got text, assume the AI is done for this turn
-                        status.update(label="Processing complete.", state="complete", expanded=False)
-                        processing_complete = True
-                    elif next_prompt_parts:
-                         # If we only got function calls/responses, loop again sending results back
-                         current_prompt_content = next_prompt_parts
-                         status.update(label="Sending tool results back to AI...")
-                    else:
-                         # No text, no function call responses to send back? Unusual state.
-                         status.warning("AI turn finished without text or further actions needed. Ending turn.")
-                         processing_complete = True # Exit loop
 
-            except Exception as e:
-                error_message = f"🔴 An error occurred during chat processing: {e}"
-                print(error_message)
-                status.update(label="Error", state="error", expanded=True)
-                assistant_outputs[turn_index].append({"type": "text", "data": "Sorry, I encountered an error processing your request."})
-                # Ensure processing_complete is set to exit loop on error
-                processing_complete = True
-            finally:
-                 # Update session state AFTER the loop finishes for this turn
-                 # Consolidate outputs for storage in session state (optional, could just keep text)
-                 final_assistant_content_for_history = "\n\n".join([str(out["data"]) for out in assistant_outputs[turn_index]]) # Basic string concatenation for now
-                 st.session_state.messages.append({"role": "assistant", "content": final_assistant_content_for_history})
+        except Exception as e:
+            error_message = f"🔴 An error occurred: {e}"
+            print(error_message)
+            status_placeholder.update(label="Error", state="error", expanded=True)
+            st.error(f"Sorry, I encountered an error: {e}") # Show error in main area too
+            # Add error message to history
+            st.session_state.messages.append({"role": "assistant", "content": "[Error occurred processing request]"})
 
-    # Force Streamlit to rerun from top to display the new messages correctly
-    # Use with caution, ensure state is managed properly to avoid infinite loops
-    st.rerun()
+]    st.rerun()
