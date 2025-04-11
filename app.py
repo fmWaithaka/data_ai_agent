@@ -61,12 +61,19 @@ def configure_page() -> None:
 
 
 def initialize_session_state() -> None:
-    """Initializes Streamlit session state variables."""
+    """Initialize and maintain conversation history"""
     if "messages" not in st.session_state:
         st.session_state.messages = []
+    
     if "assistant_details" not in st.session_state:
         st.session_state.assistant_details = {}
-
+    
+    max_history = 20  
+    if len(st.session_state.messages) > max_history * 2:  # Each exchange has user+assistant
+        st.session_state.messages = st.session_state.messages[-max_history * 2:]
+        st.session_state.assistant_details = {
+            k: v for k, v in list(st.session_state.assistant_details.items())[-max_history:]
+        }
 
 def render_chat_interface(client: Any) -> None:
     """Renders the main chat interface and handles user interactions."""
@@ -78,24 +85,24 @@ def render_chat_interface(client: Any) -> None:
     if prompt := st.chat_input("Ask about data, request analysis or plots..."):
         handle_user_input(prompt, client)
 
-
 def handle_user_input(prompt: str, client: Any) -> None:
-    """Processes user input and coordinates AI response generation."""
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    
+    """Process user input with conversation context"""
+    # Store user message
     with st.chat_message("user"):
         st.markdown(prompt)
-        
+    
+    new_messages = [*st.session_state.messages, {"role": "user", "content": prompt}]
+    
     with st.chat_message("assistant"):
-        process_ai_response(client, prompt)
+        process_ai_response(client, prompt, len(new_messages))  # Pass next index
+    
+    st.session_state.messages = new_messages
 
 
-def process_ai_response(client: Any, prompt: str) -> None:
-    """Orchestrates AI response processing and output rendering."""
+def process_ai_response(client: Any, prompt: str, current_turn: int) -> None:
+    """Handle AI response with conversation context"""
     response_container = st.container()
     status_container = st.status("Processing request...", expanded=STATUS_EXPANDED)
-    
-    current_turn = len(st.session_state.messages)
     
     try:
         tool_handler = ToolHandler(client)
@@ -113,8 +120,7 @@ def process_ai_response(client: Any, prompt: str) -> None:
         update_chat_history(current_turn, tool_handler)
         
     except Exception as e:
-        handle_processing_error(e, status_container, current_turn) 
-
+        handle_processing_error(e, status_container, current_turn)
 
 async def process_response_stream(client: Any, prompt: str, tool_handler: ToolHandler,
                                 response_container: Any, status_container: Any) -> None:
@@ -169,31 +175,61 @@ def handle_stream_chunk(chunk: StreamMessage, response_container: Any,
 
 
 def update_chat_history(current_turn: int, tool_handler: ToolHandler) -> None:
-    """Updates chat history with the current interaction details."""
-    st.session_state.assistant_details[current_turn] = tool_handler.stream_output
-    st.session_state.messages.append({
+    """Update history with conversation context"""
+    # Create copies to avoid direct mutation
+    new_details = st.session_state.assistant_details.copy()
+    new_messages = st.session_state.messages.copy()
+    
+    # Store assistant response at the correct position
+    new_details[current_turn] = tool_handler.stream_output.copy()
+    new_messages.append({
         "role": "assistant",
-        "content": tool_handler.final_text or "[AI Processed Request]"
+        "content": tool_handler.final_text or "[Analysis Complete]"
     })
+    
+    # Atomic state update
+    st.session_state.assistant_details = new_details
+    st.session_state.messages = new_messages
 
 
 def handle_processing_error(error: Exception, status_container: Any,
                           current_turn: int) -> None:
-    """Handles errors during response processing."""
-    logger.error("Processing error: %s", error, exc_info=True)
+    """Ensure errors are persisted in history"""
     error_msg = f"Processing error: {str(error)}"
     
-    status_container.update(label="Error", state="error", expanded=True)
-    st.error(error_msg)
+    # Create copies for safe update
+    new_details = st.session_state.assistant_details.copy()
+    new_messages = st.session_state.messages.copy()
     
-    st.session_state.assistant_details[current_turn] = [
-        {"type": "error", "content": error_msg}
-    ]
-    st.session_state.messages.append({
+    new_details[current_turn] = [{"type": "error", "content": error_msg}]
+    new_messages.append({
         "role": "assistant",
         "content": "[Error Processing Request]"
     })
+    
+    # Atomic update
+    st.session_state.assistant_details = new_details
+    st.session_state.messages = new_messages
+    
+    # UI updates
+    status_container.update(label="Error", state="error", expanded=True)
+    st.error(error_msg)
 
+def render_chat_interface(client: Any) -> None:
+    """Render chat interface with conversation controls"""
+    st.title("Retail DB Analyst Agent (Live API)")
+    st.markdown("---")
+    
+    # Add clear history button
+    if st.sidebar.button("Clear Conversation History"):
+        st.session_state.messages = []
+        st.session_state.assistant_details = {}
+        st.rerun()
+    
+    render_chat_history()
+    
+    if prompt := st.chat_input("Ask about data, request analysis or plots..."):
+        handle_user_input(prompt, client)
 
 if __name__ == "__main__":
     main()

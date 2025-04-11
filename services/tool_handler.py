@@ -98,10 +98,12 @@ class ToolHandler:
         * **Schema Tools:**
             * `show_tables()`: Lists available tables. Use when needed to understand scope.
             * `get_table_columns(table_name: str)`: Gets schema details. Use when needed to formulate correct queries.
-        * **Code Execution Tool:**
-            * Built-in Python environment (includes `pandas`, `numpy`, `matplotlib`, `seaborn`, `scipy`).
-            * Use this *after* fetching data via `execute_query` when SQL is insufficient for: complex statistics (outliers, correlation), advanced data reshaping (pivoting), or creating visualizations (plots).
-            * **Process:** Fetch data with SQL -> Generate Python code (import libraries, process data, `plt.show()` for plots) -> Execute code.
+        * **Code Execution Tool (Built-in Python):**
+            * Environment includes `pandas`, `numpy`, `matplotlib`, `seaborn`, `scipy`.
+            * Use ONLY when SQL is insufficient (complex stats, complex transforms, generating visualizations).
+            * **Visualization Process:** Generate Python code that creates and configures a **Matplotlib/Seaborn** plot. **Crucially, end the plot generation code with `plt.show()`**. The execution environment will attempt to capture this plot. Do **NOT** print base64 strings.
+            * **Data Handling:** Fetch data with SQL -> Generate Python code (import libs, process data) -> Execute. Avoid `print()` for intermediate data results.
+
 
         **3. Core Task Guidance (Perform these based on user requests):**
         * **Exploration & Profiling:** Provide table lists (`show_tables`), column details (`get_table_columns`), row counts (`COUNT(*)`), distinct value counts (`COUNT(DISTINCT col)`), Min/Max/Avg values, and data type summaries. Use code execution for distribution plots (histograms, box plots).

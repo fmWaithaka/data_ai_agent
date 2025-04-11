@@ -19,20 +19,15 @@ def display_results(container, result_data, execute_query_sql=None) -> None:
                 if "error" in result_data[0]:
                     container.error(f"Database Error: {result_data[0]['error']}")
                     return
-
-                # Display SQL if available
                 if execute_query_sql:
-                    with container.expander("View SQL Query", expanded=False):
-                        st.code(execute_query_sql, language="sql")
-
-                # Attempt DataFrame display
+                    container.markdown("**SQL Query Executed:**")
+                    container.code(execute_query_sql, language="sql")
                 try:
                     container.dataframe(result_data)
                 except Exception as df_error:
                     container.warning(f"DataFrame Error: {df_error}")
                     container.write(result_data)
 
-                # Single metric detection
                 if len(result_data) == 1 and len(result_data[0]) == 1:
                     key, value = next(iter(result_data[0].items()))
                     if isinstance(value, (int, float)):
@@ -55,44 +50,61 @@ def display_results(container, result_data, execute_query_sql=None) -> None:
         container.error(f"Display Error: {str(e)}")
 
 def display_code_execution_results(container, result_part_dict: Dict[str, Any]) -> None:
-    """Render code execution results with plot detection"""
+    """Render code execution results, checking output for plot image data."""
     try:
-        outcome = str(result_part_dict.get('outcome', 'UNKNOWN')).upper()
-        output = str(result_part_dict.get('output', ''))
+        outcome_val = result_part_dict.get('outcome', 'UNKNOWN')
+        outcome_str = str(outcome_val).upper() 
+        output_str = str(result_part_dict.get('output', '')).strip()
 
-        if outcome == 'OK':
-            container.success("✅ Code executed successfully")
-            if output:
-                if _display_matplotlib_plot(container):
-                    return
+        logger.info(f"Code Execution Outcome Received: {outcome_str}")
+        logger.debug(f"Code Execution Output Received (first 100 chars): {output_str[:100]}")
+
+        is_success = "ERROR" not in outcome_str and \
+                     "FAIL" not in outcome_str and \
+                     "UNKNOWN" not in outcome_str and \
+                     outcome_str 
+
+        if is_success:
+            container.success("✅ Code executed successfully.")
+            plot_displayed = False
+        
+            if output_str:
+                cleaned_output = output_str.strip("b'\"")
+                if cleaned_output.startswith('iVBOR') or cleaned_output.startswith('/9j/'):
+                    try:
+                        logger.info("Potential base64 image data detected in output.")
+                        img_bytes = base64.b64decode(cleaned_output)
+                        container.markdown("**Generated Plot:**")
+                        container.image(io.BytesIO(img_bytes))
+                        logger.info("Displayed plot from code execution output.")
+                        plot_displayed = True
+                    except Exception as img_e:
+                        logger.warning(f"Failed to decode/display base64 image: {img_e}. Displaying raw output instead.")
+
+            # --- Display Text Output if No Plot Was Shown or if Output Remained ---
+            if output_str and not plot_displayed:
                 container.markdown("**Code Output:**")
-                container.code(output, language='text')
-        else:
-            container.error(f"Execution Failed: {outcome}")
-            if output:
-                container.code(output, language='text')
-    except Exception as e:
-        logger.error("Code display error: %s", e)
-        container.error(f"Code Display Error: {str(e)}")
+                container.code(output_str, language='text')
+            elif not output_str and not plot_displayed:
+                 container.info("Code executed successfully with no output detected.")
 
-def _display_matplotlib_plot(container) -> bool:
-    """Attempt to display matplotlib plot returns success status"""
-    try:
-        fig = plt.gcf()
-        if fig and fig.axes:
-            container.pyplot(fig)
-            plt.close(fig)
-            return True
+        else: #
+            container.error(f"⚠️ Code execution failed: {outcome_str}")
+            if output_str:
+                container.markdown("**Execution Error Output:**")
+                container.code(output_str, language='text') 
+
     except Exception as e:
-        logger.debug("Plot display attempt failed: %s", e)
-    return False
+        logger.error("Error rendering code execution results: %s", e)
+        container.error(f"Error displaying code execution output: {str(e)}")
 
 def render_chat_history() -> None:
-    """Render chat message history with state management"""
+    """Render complete conversation history with context"""
     for idx, message in enumerate(st.session_state.messages):
         with st.chat_message(message["role"]):
             if message["role"] == "assistant":
-                _render_assistant_message(idx)
+                turn_idx = idx // 2  # Calculate conversation turn
+                _render_assistant_message(turn_idx)
             else:
                 st.markdown(message["content"])
 
