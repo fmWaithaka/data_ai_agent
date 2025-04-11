@@ -7,7 +7,7 @@ from typing import Dict, Any, List
 import matplotlib.pyplot as plt
 import streamlit as st
 
-from utils.db_utils import show_tables, get_table_columns  
+from utils.db_utils import db_manager
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +129,7 @@ def _get_cached_tables() -> List[str]:
     @st.cache_data(ttl=3600)
     def cached_show_tables():
         try:
-            return show_tables()
+            return db_manager.show_tables()  # Updated call
         except Exception as e:
             logger.error("Table load error: %s", e)
             return []
@@ -140,7 +140,7 @@ def _display_table_columns(table_name: str) -> None:
     @st.cache_data(ttl=3600)
     def cached_get_columns(table: str):
         try:
-            return get_table_columns(table)
+            return db_manager.get_table_columns(table)  # Updated call
         except Exception as e:
             logger.error("Column load error: %s", e)
             return None

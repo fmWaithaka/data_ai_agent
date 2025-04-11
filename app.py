@@ -95,9 +95,10 @@ def process_ai_response(client: Any, prompt: str) -> None:
     response_container = st.container()
     status_container = st.status("Processing request...", expanded=STATUS_EXPANDED)
     
+    current_turn = len(st.session_state.messages)
+    
     try:
         tool_handler = ToolHandler(client)
-        current_turn = len(st.session_state.messages)
         
         asyncio.run(
             process_response_stream(
@@ -112,7 +113,7 @@ def process_ai_response(client: Any, prompt: str) -> None:
         update_chat_history(current_turn, tool_handler)
         
     except Exception as e:
-        handle_processing_error(e, status_container, current_turn)
+        handle_processing_error(e, status_container, current_turn) 
 
 
 async def process_response_stream(client: Any, prompt: str, tool_handler: ToolHandler,

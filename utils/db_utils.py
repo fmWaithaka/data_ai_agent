@@ -1,124 +1,133 @@
-# db_utils.py
-import os
+"""
+Database utilities with enhanced security and integration with app configuration
+"""
+
+import logging
+from contextlib import contextmanager
+from typing import Iterator, List, Dict, Any, Optional
 import mysql.connector
-from mysql.connector import Error
-from dotenv import load_dotenv
+from mysql.connector import Error, pooling
 
-load_dotenv() # Load variables from .env
+from config import get_settings
 
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = os.getenv("DB_PORT", "3306")
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_NAME = os.getenv("DB_NAME")
-DB_AUTH_PLUGIN = os.getenv("DB_AUTH_PLUGIN") # Will be None if not set
+# Configure logging
+logger = logging.getLogger(__name__)
 
-def create_db_connection():
-    """Creates and returns a MySQL database connection."""
-    connection = None
-    try:
-        conn_args = {
-            'host': DB_HOST,
-            'port': int(DB_PORT),
-            'user': DB_USER,
-            'password': DB_PASSWORD,
-            'database': DB_NAME,
-        }
-        # Only add auth_plugin if it's set
-        if DB_AUTH_PLUGIN:
-            conn_args['auth_plugin'] = DB_AUTH_PLUGIN
+# Get application settings
+settings = get_settings()
 
-        connection = mysql.connector.connect(**conn_args)
-        # print("MySQL Database connection successful") # Keep this for debug if needed
-    except Error as e:
-        print(f"Error connecting to MySQL Database: '{e}'")
-    return connection
+class DatabaseManager:
+    """Manages database connections and operations"""
+    
+    def __init__(self):
+        self.pool = self._create_connection_pool()
+        
+    def _create_connection_pool(self) -> pooling.MySQLConnectionPool:
+        """Create connection pool using application settings"""
+        return pooling.MySQLConnectionPool(
+            pool_name="retail_analytics_pool",
+            pool_size=5,
+            host=settings.db_host,
+            port=settings.db_port,
+            user=settings.db_user,
+            password=settings.db_password,
+            database=settings.db_name,
+            auth_plugin='mysql_native_password' if settings.db_type == 'mysql' else None
+        )
 
-def show_tables() -> list[str]:
-    """Retrieve the names of all tables in the database."""
-    tables = []
-    conn = create_db_connection()
-    if conn and conn.is_connected():
+    @contextmanager
+    def get_connection(self) -> Iterator[mysql.connector.connection.MySQLConnection]:
+        """Context manager for safe connection handling"""
+        conn = self.pool.get_connection()
         try:
-            cursor = conn.cursor()
-            cursor.execute("SHOW TABLES;")
-            tables = [table[0] for table in cursor.fetchall()]
-            cursor.close()
+            yield conn
         except Error as e:
-            print(f"Error showing tables: {e}")
+            logger.error("Database connection error: %s", e)
+            raise
         finally:
             conn.close()
-    return tables
 
-def get_table_columns(table_name: str) -> list[dict]:
-    """Get column information for a specific table.
-
-    Returns:
-        List of dictionaries {'COLUMN_NAME': ..., 'DATA_TYPE': ..., 'IS_NULLABLE': ...}
-    """
-    columns_info = []
-    conn = create_db_connection()
-    if conn and conn.is_connected():
+    def show_tables(self) -> List[str]:
+        """Retrieve all tables in the database"""
         try:
-            cursor = conn.cursor(dictionary=True) # Fetch as dicts
-            # Use prepared statement placeholder style for mysql.connector
-            query = """
-                SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
-                FROM INFORMATION_SCHEMA.COLUMNS
-                WHERE TABLE_SCHEMA = %s
-                AND TABLE_NAME = %s
-                ORDER BY ORDINAL_POSITION;
-            """
-            cursor.execute(query, (DB_NAME, table_name)) # Pass DB_NAME and table_name
-            columns_info = cursor.fetchall()
-            cursor.close()
+            with self.get_connection() as conn, conn.cursor() as cursor:
+                cursor.execute("SHOW TABLES")
+                return [table[0] for table in cursor.fetchall()]
         except Error as e:
-            print(f"Error getting columns for table {table_name}: {e}")
-        finally:
-            conn.close()
-    return columns_info
+            logger.error("Failed to retrieve tables: %s", e)
+            return []
 
-
-def execute_query(sql: str) -> list[dict]:
-    """Execute an SQL query and return results as a list of dictionaries."""
-    results = []
-    conn = create_db_connection()
-    # Basic validation: Deny potentially harmful commands if needed
-    # This is a VERY basic check, consider more robust validation/sandboxing
-    disallowed_keywords = ['DROP', 'DELETE', 'UPDATE', 'INSERT', 'ALTER', 'TRUNCATE', 'GRANT', 'REVOKE']
-    if any(keyword in sql.upper() for keyword in disallowed_keywords):
-         print(f"Error: Query contains disallowed keyword: {sql}")
-         # Optionally raise an error or return specific error message
-         return [{"error": "Query contains disallowed keywords (e.g., DROP, DELETE, UPDATE). Only SELECT is allowed."}]
-
-    if conn and conn.is_connected():
+    def get_table_columns(self, table_name: str) -> List[Dict[str, str]]:
+        """Get full column metadata for a table"""
+        query = """
+            SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_KEY, EXTRA
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+            ORDER BY ORDINAL_POSITION
+        """
         try:
-            # Use dictionary=True to get results directly as dicts
-            cursor = conn.cursor(dictionary=True)
-            cursor.execute(sql)
-            results = cursor.fetchall()
-            cursor.close()
+            with self.get_connection() as conn, conn.cursor(dictionary=True) as cursor:
+                cursor.execute(query, (settings.db_name, table_name))
+                return cursor.fetchall()
         except Error as e:
-            print(f"Error executing query '{sql}': {e}")
-            # Return error message in a structured way
+            logger.error("Failed to get columns for %s: %s", table_name, e)
+            return []
+
+    def execute_query(self, sql: str) -> List[Dict[str, Any]]:
+        """Execute a read-only query with security validation"""
+        if not self._validate_query(sql):
+            logger.warning("Blocked potentially unsafe query: %s", sql)
+            return [{"error": "Query contains unauthorized operations"}]
+
+        try:
+            with self.get_connection() as conn, conn.cursor(dictionary=True) as cursor:
+                cursor.execute(sql)
+                return cursor.fetchall()[:settings.max_query_rows]
+        except Error as e:
+            logger.error("Query execution failed: %s", e)
             return [{"error": f"Database error: {e}"}]
         except Exception as e:
-             print(f"General Error executing query '{sql}': {e}")
-             return [{"error": f"An unexpected error occurred: {e}"}]
-        finally:
-            conn.close()
-    else:
-         return [{"error": "Failed to connect to the database."}]
-    return results
+            logger.exception("Unexpected error executing query")
+            return [{"error": f"Unexpected error: {e}"}]
+        
+    def _validate_query(self, query: str) -> bool:
+        """Validate SQL query against security policies"""
+        clean_query = query.strip().upper()
+        allowed_keywords = {"SELECT", "SHOW", "DESCRIBE", "EXPLAIN"}
+        forbidden_keywords = {
+            "INSERT", "UPDATE", "DELETE", "DROP", "ALTER",
+            "CREATE", "TRUNCATE", "GRANT", "REVOKE"
+        }
 
-# --- Test function ---
-# if __name__ == '__main__':
-#     print("Testing DB Utilities...")
-#     # Test connection implicitly via functions
-#     print("Tables:", show_tables())
-#     if show_tables():
-#          print("Columns for 'orders':", get_table_columns('orders'))
-#          print("Sample Query (First 2 orders):", execute_query("SELECT * FROM orders LIMIT 2;"))
-#          print("Sample Query (Non-SELECT):", execute_query("UPDATE orders SET order_status = 'TEST' WHERE order_id = 1;")) # Should fail/return error
-#     else:
-#          print("Could not connect to DB to run tests.")
+        if any(kw in clean_query for kw in forbidden_keywords):
+            return False
+        return any(kw in clean_query for kw in allowed_keywords)
+
+    def get_foreign_keys(self) -> Dict[str, List[Dict[str, str]]]:
+        """Retrieve foreign key relationships for data modeling"""
+        query = """
+            SELECT 
+                TABLE_NAME, COLUMN_NAME, 
+                REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+            FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+            WHERE TABLE_SCHEMA = %s 
+            AND REFERENCED_TABLE_NAME IS NOT NULL
+        """
+        try:
+            with self.get_connection() as conn, conn.cursor(dictionary=True) as cursor:
+                cursor.execute(query, (settings.db_name,))
+                relationships = {}
+                for row in cursor:
+                    table = row["TABLE_NAME"]
+                    relationships.setdefault(table, []).append({
+                        "source_column": row["COLUMN_NAME"],
+                        "target_table": row["REFERENCED_TABLE_NAME"],
+                        "target_column": row["REFERENCED_COLUMN_NAME"]
+                    })
+                return relationships
+        except Error as e:
+            logger.error("Failed to retrieve foreign keys: %s", e)
+            return {}
+
+# Initialize database manager instance
+db_manager = DatabaseManager()

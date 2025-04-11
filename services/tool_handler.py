@@ -8,10 +8,10 @@ from typing import Dict, Any, AsyncGenerator, List
 
 from google.genai import types
 from utils.custom_types import StreamMessage
-from utils.db_utils import show_tables, get_table_columns, execute_query 
+from utils.db_utils import db_manager 
 
 logger = logging.getLogger(__name__)
-MODEL_NAME = 'gemini-2.0-flash-exp' 
+MODEL_NAME = 'gemini-2.0-flash-exp'
 
 class ToolHandler:
     """Manages tool declarations and execution flow"""
@@ -21,21 +21,66 @@ class ToolHandler:
         self.stream_output = []
         self.final_text = None
         self.available_functions = {  
-            "show_tables": show_tables,
-            "get_table_columns": get_table_columns,
-            "execute_query": execute_query
+            "show_tables": db_manager.show_tables,  
+            "get_table_columns": db_manager.get_table_columns, 
+            "execute_query": db_manager.execute_query 
         }
         self.function_declarations = self._init_tool_declarations()
 
     def _init_tool_declarations(self) -> list:
-        """Initialize supported tool declarations"""
+        """Initialize supported tool declarations with corrected parameter definitions"""
         try:
             return [
-                types.FunctionDeclaration.from_callable(
-                    client=self.client,
-                    callable=func
-                ) for func in self.available_functions.values()
+                types.FunctionDeclaration(
+                    name="show_tables",
+                    description="Retrieve list of all tables in the database",
+                    # CORRECTED: Added type: object for parameters schema
+                    parameters={
+                        "type": types.Type.OBJECT, # Use SDK enum if available
+                        # Or "type": "object", # Use string if Type enum is not correct
+                        "properties": {}
+                    }
+                ),
+                types.FunctionDeclaration(
+                    name="get_table_columns",
+                    description="Get schema information for a specific table",
+                    parameters={
+                        # Use SDK enum types where possible for consistency
+                        "type": types.Type.OBJECT,
+                        "properties": {
+                            "table_name": {
+                                "type": types.Type.STRING,
+                                "description": "Name of the table to inspect"
+                            }
+                        },
+                        "required": ["table_name"]
+                    }
+                ),
+                types.FunctionDeclaration(
+                    name="execute_query",
+                    description="Execute a read-only SQL SELECT query",
+                    parameters={
+                        "type": types.Type.OBJECT,
+                        "properties": {
+                            "sql": {
+                                "type": types.Type.STRING,
+                                "description": "SQL SELECT query to execute"
+                            }
+                        },
+                        "required": ["sql"]
+                    }
+                )
             ]
+        except AttributeError as ae:
+             # Handle potential issues if types.Type.OBJECT/STRING don't exist
+             logger.error("AttributeError during tool declaration, possibly types.Type enum changed: %s", ae)
+             # Fallback to string types (less robust but might work)
+             logger.warning("Falling back to string types for tool parameters.")
+             return [
+                types.FunctionDeclaration(name="show_tables", description="Retrieve list of all tables", parameters={"type": "object", "properties": {}}),
+                types.FunctionDeclaration(name="get_table_columns", description="Get schema for a table", parameters={"type": "object", "properties": {"table_name": {"type": "string"}}, "required": ["table_name"]}),
+                types.FunctionDeclaration(name="execute_query", description="Execute SELECT SQL query", parameters={"type": "object", "properties": {"sql": {"type": "string"}}, "required": ["sql"]})
+             ]
         except Exception as e:
             logger.error("Tool declaration failed: %s", e)
             raise
